@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-resolver:
+    name: Resolver test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run resolver test suite
+        run: bash test-resolve-dependency-refs.sh
+
+  self-test:
+    name: Action self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build fixture repositories
+        run: |
+          git init --quiet --initial-branch=master fixture
+          cd fixture
+          git config user.name "CI"
+          git config user.email "ci@example.invalid"
+          git commit --quiet --allow-empty -m "master base"
+          git switch --quiet -c staging
+          git commit --quiet --allow-empty -m "staging base"
+          git switch --quiet -c feature
+          git commit --quiet --allow-empty -m "feature"
+          git switch --quiet -c current
+          git commit --quiet --allow-empty -m "current"
+          for branch in master staging feature current; do
+            git update-ref "refs/remotes/origin/$branch" "refs/heads/$branch"
+          done
+          echo "current_sha=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          cd ..
+          git clone --quiet --bare fixture fixture-specs.git
+          git -C fixture-specs.git symbolic-ref HEAD refs/heads/master
+          echo "fixture_specs=$PWD/fixture-specs.git" >> "$GITHUB_ENV"
+
+      - name: Resolve through the action
+        uses: ./
+        with:
+          source-directory: fixture
+          source-branch: current
+          dependencies: specs ${{ env.fixture_specs }}
+
+      - name: Check exported variables
+        run: |
+          test "$specs_branch" = current
+          test "$specs_ref" = "$current_sha"
+          test "$specs_default" = master
+          echo "Exported specs_branch=$specs_branch specs_ref=$specs_ref specs_default=$specs_default"

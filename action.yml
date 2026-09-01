@@ -1,0 +1,54 @@
+name: Branch stack resolver
+description: >
+  Determines, for each dependency repository, the commit that matches the
+  branch stack of the event that triggered the workflow. Exposes one
+  environment variable per dependency prefix: <prefix>_ref, <prefix>_branch
+  and <prefix>_default.
+
+inputs:
+  source-directory:
+    description: >
+      Path to the checked-out source repository. The repository must be
+      checked out with fetch-depth: 0 so origin refs are available.
+    required: true
+  dependencies:
+    description: >
+      Whitespace- or newline-separated pairs of "output-prefix repository".
+      The repository may be "owner/name", a URL or an absolute path.
+    required: true
+  source-branch:
+    description: Name of the branch being tested.
+    default: ${{ github.head_ref || github.ref_name }}
+  integration-branch:
+    description: Integration branch name. Defaults to staging.
+  root-branch:
+    description: Root branch name. Defaults to master.
+  evidence-repositories:
+    description: >
+      Space-separated repositories consulted as extra ordering evidence,
+      e.g. repos that depend on the source rather than the other way around.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SOURCE_DIRECTORY: ${{ inputs.source-directory }}
+        SOURCE_BRANCH: ${{ inputs.source-branch }}
+        INTEGRATION_BRANCH: ${{ inputs.integration-branch }}
+        ROOT_BRANCH: ${{ inputs.root-branch }}
+        EVIDENCE_REPOSITORIES: ${{ inputs.evidence-repositories }}
+        DEPENDENCIES: ${{ inputs.dependencies }}
+      run: |
+        output_file=$(mktemp)
+        dep_args=()
+        while read -r -a pair; do
+          dep_args+=("${pair[@]}")
+        done <<< "$DEPENDENCIES"
+
+        GITHUB_OUTPUT="$output_file" \
+          bash "$GITHUB_ACTION_PATH/resolve-dependency-refs.sh" \
+          "$SOURCE_DIRECTORY" "${dep_args[@]}"
+
+        cat "$output_file" >> "$GITHUB_ENV"
+        rm -f "$output_file"
