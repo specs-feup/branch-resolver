@@ -51,21 +51,29 @@ repository_id() {
 declare -A pr_bases=()
 
 fetch_pr_edges() {
-  local id=$1 json head base
+  local id=$1 page=1 json head base count
   local -a auth=()
   [[ -n ${GITHUB_TOKEN:-} ]] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
   command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
-  json=$(curl -sfL ${auth[@]+"${auth[@]}"} \
-    "${GITHUB_API_URL:-https://api.github.com}/repos/${id}/pulls?state=open&per_page=100") || {
-    echo "Warning: could not fetch pull request metadata for ${id}" >&2
-    return 0
-  }
-  while IFS=$'\t' read -r head base; do
-    [[ -n $head && -n $base ]] || continue
-    pr_bases["${id}|${head}"]=$base
-  done < <(jq -r --arg id "$id" \
-    '.[] | select(.head.repo != null and .head.repo.full_name == $id) | "\(.head.ref)\t\(.base.ref)"' \
-    <<<"$json")
+  while :; do
+    if ! json=$(curl -sfL ${auth[@]+"${auth[@]}"} \
+      "${GITHUB_API_URL:-https://api.github.com}/repos/${id}/pulls?state=open&per_page=100&page=${page}"); then
+      echo "Warning: could not fetch pull request metadata for ${id}" >&2
+      return 0
+    fi
+    count=$(jq -r 'length' <<<"$json" 2>/dev/null) || {
+      echo "Warning: could not parse pull request metadata for ${id}" >&2
+      return 0
+    }
+    while IFS=$'\t' read -r head base; do
+      [[ -n $head && -n $base ]] || continue
+      pr_bases["${id}|${head}"]=$base
+    done < <(jq -r --arg id "$id" \
+      '.[] | select(.head.repo != null and .head.repo.full_name == $id) | "\(.head.ref)\t\(.base.ref)"' \
+      <<<"$json")
+    [[ $count -lt 100 ]] && break
+    (( page += 1 ))
+  done
 }
 
 source_repository_id=
@@ -250,6 +258,9 @@ add_candidate "$root_branch"
 # event, even when its git history can no longer prove them (a rebase
 # without a merge commit). They are required and selectable for
 # dependencies.
+# Stack levels at or below the event commit that a dependency branch must
+# contain, plus the event's own branch: the first dependency branch
+# covering all of them is the match.
 declare -A required_levels=()
 required_levels[$source_branch]=1
 base_branch=$source_branch
@@ -435,14 +446,15 @@ for ((dependency_index = 0; dependency_index < ${#dependency_repositories[@]}; d
       exit 1
     fi
     # Keep only the smallest qualifying branches: a branch containing
-    # another qualifying branch is newer than needed.
+    # another qualifying branch is newer than needed, since that other
+    # branch already covers the required levels.
     declare -a minimal=()
     for i in "${qualifying[@]}"; do
       is_minimal=true
       for j in "${qualifying[@]}"; do
         [[ $i == "$j" ]] && continue
         [[ ${pool_sha[$i]} == "${pool_sha[$j]}" ]] && continue
-        if git -C "$repository_path" merge-base --is-ancestor "refs/heads/${candidates[$i]}" "refs/heads/${candidates[$j]}"; then
+        if git -C "$repository_path" merge-base --is-ancestor "refs/heads/${candidates[$j]}" "refs/heads/${candidates[$i]}"; then
           is_minimal=false
           break
         fi

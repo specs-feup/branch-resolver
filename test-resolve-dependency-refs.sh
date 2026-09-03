@@ -301,7 +301,24 @@ git -C "$switched_dependency" switch --quiet master
 publish_origin "$switched_dependency"
 
 switched_dependency_tip=$(git -C "$switched_dependency" rev-parse multi-weaver)
-SOURCE_BRANCH=ci-fix GITHUB_OUTPUT="${test_directory}/switched-output" \
+# An evidence repository stacking langSpecV3 below multi-weaver proves
+# langSpecV3 into the pool via propagation; the dependency still resolves
+# to its smallest covering branch (multi-weaver), never to that newer
+# pool descendant.
+switched_evidence=$(new_fixture_repo switched-evidence)
+fcommit "$switched_evidence" "se master"
+git -C "$switched_evidence" switch --quiet -c staging
+fcommit "$switched_evidence" "se staging"
+git -C "$switched_evidence" switch --quiet -c langSpecV3
+fcommit "$switched_evidence" "se langSpecV3"
+git -C "$switched_evidence" switch --quiet -c multi-weaver
+fcommit "$switched_evidence" "se multi-weaver"
+git -C "$switched_evidence" switch --quiet -c ci-fix
+fcommit "$switched_evidence" "se ci-fix"
+publish_origin "$switched_evidence"
+
+SOURCE_BRANCH=ci-fix EVIDENCE_REPOSITORIES="$switched_evidence" \
+  GITHUB_OUTPUT="${test_directory}/switched-output" \
   bash "$resolver" "$switched_source" \
     lara "$switched_dependency" \
     >"${test_directory}/switched.log" 2>&1
