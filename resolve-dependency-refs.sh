@@ -36,10 +36,15 @@ repository_url() {
 # resolved only by its own evidence.
 repository_id() {
   local url=${1%.git}
-  if [[ $url == *github.com/* ]]; then
-    url=${url##*github.com/}
-  elif [[ $url == *github.com:* ]]; then
-    url=${url##*github.com:}
+  url=${url%%#*}
+  if [[ $url == *://* ]]; then
+    # Any https/ssh host (github.com or GitHub Enterprise): the owner/name
+    # path follows the host, optionally through a port.
+    url=${url#*://}
+    url=${url#*/}
+  elif [[ $url == *:* ]]; then
+    # scp-style user@host:owner/name
+    url=${url##*:}
   fi
   echo "$url"
 }
@@ -65,11 +70,15 @@ fetch_pr_edges() {
       echo "Warning: could not parse pull request metadata for ${id}" >&2
       return 0
     }
+    # Every record from this endpoint is a pull request against this
+    # repository, so each head -> base branch is a stack level of this
+    # repository's namespace. The head repository can be a fork of it (the
+    # event pull request itself in a fork-originated run), so the head
+    # repository's name must not be used as a filter.
     while IFS=$'\t' read -r head base; do
       [[ -n $head && -n $base ]] || continue
       pr_bases["${id}|${head}"]=$base
-    done < <(jq -r --arg id "$id" \
-      '.[] | select(.head.repo != null and .head.repo.full_name == $id) | "\(.head.ref)\t\(.base.ref)"' \
+    done < <(jq -r '.[] | "\(.head.ref)\t\(.base.ref)"' \
       <<<"$json")
     [[ $count -lt 100 ]] && break
     (( page += 1 ))

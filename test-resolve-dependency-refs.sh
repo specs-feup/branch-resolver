@@ -458,6 +458,80 @@ if SOURCE_BRANCH=java-deprecation PR_BASE_EDGES="$pr_edges_file" \
 fi
 grep -Fq "Ambiguous newest branches" "${test_directory}/conflict.log"
 
+# The resolver can fetch PR base metadata from a GitHub API. A stub curl
+# serves a canned open-pull-requests response so the fetch path is exercised
+# offline.
+stub_directory="${test_directory}/stub"
+mkdir -p "$stub_directory"
+cat > "$stub_directory/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s' '[{"head":{"repo":{"full_name":"specs-feup/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]'
+EOF
+chmod +x "$stub_directory/curl"
+
+make_edge_fixture() {
+  local prefix=$1
+  local source_repository dependency
+  source_repository=$(new_fixture_repo "${prefix}-source")
+  git -C "$source_repository" remote add origin "$2"
+  fcommit "$source_repository" "${prefix} master"
+  git -C "$source_repository" switch --quiet -c staging
+  fcommit "$source_repository" "${prefix} staging"
+  git -C "$source_repository" switch --quiet -c multi-weaver
+  fcommit "$source_repository" "${prefix} multi-weaver"
+  # ci-fix branches from staging, not from multi-weaver: git history alone
+  # can neither prove multi-weaver as a level below the event nor order it
+  # against ci-fix, so only the PR metadata can.
+  git -C "$source_repository" switch --quiet staging
+  git -C "$source_repository" switch --quiet -c ci-fix
+  fcommit "$source_repository" "${prefix} ci-fix"
+  publish_origin "$source_repository"
+
+  dependency=$(new_fixture_repo "${prefix}-dependency")
+  fcommit "$dependency" "${prefix}d master"
+  git -C "$dependency" switch --quiet -c staging
+  fcommit "$dependency" "${prefix}d staging"
+  git -C "$dependency" switch --quiet -c ci-fix
+  fcommit "$dependency" "${prefix}d ci-fix"
+  git -C "$dependency" switch --quiet -c multi-weaver
+  fcommit "$dependency" "${prefix}d multi-weaver"
+  git -C "$dependency" switch --quiet master
+  publish_origin "$dependency"
+
+  echo "$source_repository $dependency"
+}
+
+# A fork-originated pull_request run: the source repository's open PR lists
+# the event PR, but its head repository is a fork, not the source itself.
+# The head -> base edge is still the authoritative stack definition of the
+# base repository's namespace and must be recorded.
+read -r fork_source fork_dependency <<<"$(make_edge_fixture fork "https://github.com/specs-feup/branch-resolver.git")"
+cat > "$stub_directory/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s' '[{"head":{"repo":{"full_name":"fork-owner/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]'
+EOF
+chmod +x "$stub_directory/curl"
+fork_dependency_tip=$(git -C "$fork_dependency" rev-parse multi-weaver)
+PATH="$stub_directory:$PATH" SOURCE_BRANCH=ci-fix \
+  GITHUB_OUTPUT="${test_directory}/fork-output" \
+  bash "$resolver" "$fork_source" \
+    lara "$fork_dependency" \
+    >"${test_directory}/fork.log" 2>&1
+grep -Fqx "lara_branch=multi-weaver" "${test_directory}/fork-output"
+grep -Fqx "lara_ref=${fork_dependency_tip}" "${test_directory}/fork-output"
+
+# A GitHub Enterprise remote parses to the same owner/name repository id,
+# so the API lookup is attempted for Enterprise hosts too.
+read -r enterprise_source enterprise_dependency <<<"$(make_edge_fixture enterprise "https://github.example.com/specs-feup/branch-resolver.git")"
+enterprise_dependency_tip=$(git -C "$enterprise_dependency" rev-parse multi-weaver)
+PATH="$stub_directory:$PATH" SOURCE_BRANCH=ci-fix \
+  GITHUB_OUTPUT="${test_directory}/enterprise-output" \
+  bash "$resolver" "$enterprise_source" \
+    lara "$enterprise_dependency" \
+    >"${test_directory}/enterprise.log" 2>&1
+grep -Fqx "lara_branch=multi-weaver" "${test_directory}/enterprise-output"
+grep -Fqx "lara_ref=${enterprise_dependency_tip}" "${test_directory}/enterprise-output"
+
 # Propagation is scoped to the source repository and explicitly declared
 # evidence repositories: a dependency clone's own ancestry must not prove a
 # branch name into other dependencies. An unrelated dependency containing a
