@@ -83,7 +83,7 @@ fetch_pr_edges() {
     status=${response##*$'\n'}
     json=${response%$'\n'*}
     if [[ $status == 403 || $status == 404 ]]; then
-      echo "Warning: cannot read pull request metadata for ${id} (HTTP ${status}); use a token with contents:read if this is unexpected" >&2
+      echo "Warning: cannot read pull request metadata for ${id} (HTTP ${status}); use a token with pull-requests: read (or the classic repo scope) if this is unexpected" >&2
       return 0
     fi
     if [[ $status != 200 ]]; then
