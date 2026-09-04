@@ -238,6 +238,48 @@ SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/sibling-output" \
 grep -Fqx "sibling_branch=staging" "${test_directory}/sibling-output"
 grep -Fqx "sibling_ref=${staging_tip}" "${test_directory}/sibling-output"
 
+# A shallow source checkout cannot name stack levels: fail fast instead of
+# silently resolving against terminal branches.
+shallow_source="${test_directory}/shallow-source"
+git clone --quiet --depth 1 --config advice.detachedHead=false "file://${source_repository}" "$shallow_source"
+if SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/shallow-output" \
+  bash "$resolver" "$shallow_source" \
+    x "$current_dependency" \
+    >"${test_directory}/shallow.log" 2>&1; then
+  echo "Resolver accepted a shallow source checkout" >&2
+  exit 1
+fi
+grep -Fq "shallow" "${test_directory}/shallow.log"
+
+# A dependency repository without the root branch contributes no evidence
+# but must not abort the run; it still resolves from its own branches.
+noroot_dependency="${test_directory}/noroot.git"
+git clone --quiet --bare "$source_repository" "$noroot_dependency"
+while IFS= read -r ref; do
+  git -C "$noroot_dependency" update-ref -d "$ref"
+done < <(git -C "$noroot_dependency" for-each-ref --format='%(refname)' refs/heads)
+git -C "$noroot_dependency" update-ref refs/heads/staging "$staging_tip"
+git -C "$noroot_dependency" update-ref refs/heads/lmsousa "$lmsousa_tip"
+git -C "$noroot_dependency" update-ref refs/heads/workflow-fix "$workflow_fix_tip"
+git -C "$noroot_dependency" symbolic-ref HEAD refs/heads/staging
+SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/noroot-output" \
+  bash "$resolver" "$source_repository" \
+    noroot "$noroot_dependency" \
+    >"${test_directory}/noroot.log" 2>&1
+grep -Fqx "noroot_branch=workflow-fix" "${test_directory}/noroot-output"
+grep -Fqx "noroot_ref=${workflow_fix_tip}" "${test_directory}/noroot-output"
+grep -Fqx "noroot_default=staging" "${test_directory}/noroot-output"
+
+# Duplicate output prefixes would silently overwrite exported variables.
+if SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/dup-output" \
+  bash "$resolver" "$source_repository" \
+    dup "$current_dependency" dup "$older_dependency" \
+    >"${test_directory}/dup.log" 2>&1; then
+  echo "Resolver accepted duplicate output prefixes" >&2
+  exit 1
+fi
+grep -Fq "Duplicate output prefix" "${test_directory}/dup.log"
+
 # === Cross-repository stacks ===
 # The same branch names can stack in opposite orders in different
 # repositories. Each dependency is ordered only by its own repository's
@@ -465,7 +507,7 @@ stub_directory="${test_directory}/stub"
 mkdir -p "$stub_directory"
 cat > "$stub_directory/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '%s' '[{"head":{"repo":{"full_name":"specs-feup/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]'
+printf '%s\n200' '[{"head":{"repo":{"full_name":"specs-feup/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]'
 EOF
 chmod +x "$stub_directory/curl"
 
@@ -508,7 +550,7 @@ make_edge_fixture() {
 read -r fork_source fork_dependency <<<"$(make_edge_fixture fork "https://github.com/specs-feup/branch-resolver.git")"
 cat > "$stub_directory/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '%s' '[{"head":{"repo":{"full_name":"fork-owner/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]'
+printf '%s\n200' '[{"head":{"repo":{"full_name":"fork-owner/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]'
 EOF
 chmod +x "$stub_directory/curl"
 fork_dependency_tip=$(git -C "$fork_dependency" rev-parse multi-weaver)
