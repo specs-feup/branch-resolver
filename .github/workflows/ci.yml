@@ -11,6 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Shellcheck
+        run: shellcheck -S warning resolve-dependency-refs.sh test-resolve-dependency-refs.sh
+
       - name: Run resolver test suite
         run: bash test-resolve-dependency-refs.sh
 

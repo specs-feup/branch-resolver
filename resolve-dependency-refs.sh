@@ -10,13 +10,24 @@ fi
 source_directory=$1
 shift
 
+if [[ $(git -C "$source_directory" rev-parse --is-shallow-repository 2>/dev/null) != false ]]; then
+  echo "Source directory '${source_directory}' is not a usable git repository (shallow clone?); check out with fetch-depth: 0" >&2
+  exit 1
+fi
+
 source_branch=${SOURCE_BRANCH:?SOURCE_BRANCH must name the branch being tested}
 integration_branch=${INTEGRATION_BRANCH:-staging}
 root_branch=${ROOT_BRANCH:-master}
 
 declare -a dependency_prefixes=()
 declare -a dependency_repositories=()
+declare -A seen_prefixes=()
 while (( $# )); do
+  if [[ -n ${seen_prefixes[$1]+yes} ]]; then
+    echo "Duplicate output prefix '$1' in the dependency list" >&2
+    exit 2
+  fi
+  seen_prefixes[$1]=1
   dependency_prefixes+=("$1")
   dependency_repositories+=("$2")
   shift 2
@@ -56,14 +67,27 @@ repository_id() {
 declare -A pr_bases=()
 
 fetch_pr_edges() {
-  local id=$1 page=1 json head base count
+  local id=$1 page=1 response status json head base count
   local -a auth=()
   [[ -n ${GITHUB_TOKEN:-} ]] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
-  command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
+  if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "Warning: curl and jq are needed to read pull request metadata for ${id}; continuing without PR evidence" >&2
+    return 0
+  fi
   while :; do
-    if ! json=$(curl -sfL ${auth[@]+"${auth[@]}"} \
+    if ! response=$(curl -sL --retry 3 --max-time 30 -w $'\n%{http_code}' ${auth[@]+"${auth[@]}"} \
       "${GITHUB_API_URL:-https://api.github.com}/repos/${id}/pulls?state=open&per_page=100&page=${page}"); then
-      echo "Warning: could not fetch pull request metadata for ${id}" >&2
+      echo "Warning: could not fetch pull request metadata for ${id}; continuing without PR evidence" >&2
+      return 0
+    fi
+    status=${response##*$'\n'}
+    json=${response%$'\n'*}
+    if [[ $status == 403 || $status == 404 ]]; then
+      echo "Warning: cannot read pull request metadata for ${id} (HTTP ${status}); use a token with contents:read if this is unexpected" >&2
+      return 0
+    fi
+    if [[ $status != 200 ]]; then
+      echo "Warning: could not fetch pull request metadata for ${id} (HTTP ${status}); continuing without PR evidence" >&2
       return 0
     fi
     count=$(jq -r 'length' <<<"$json" 2>/dev/null) || {
@@ -191,8 +215,11 @@ collect_candidates() {
     return
   fi
   if ! git -C "$repository_path" rev-parse --verify "${root_ref}^{commit}" >/dev/null 2>&1; then
-    echo "Cannot find root branch '${root_branch}' in ${repository_path}" >&2
-    exit 1
+    if [[ $required == true ]]; then
+      echo "Cannot find root branch '${root_branch}' in ${repository_path}" >&2
+      exit 1
+    fi
+    return
   fi
 
   declare -A distance_by_commit=()
@@ -427,6 +454,7 @@ for ((dependency_index = 0; dependency_index < ${#dependency_repositories[@]}; d
   if (( ${#non_terminal_pool[@]} == 0 )); then
     # No stack level of the event exists here: fall back to the
     # conventional terminal levels.
+    echo "No proven stack level of the event exists in ${repository}; using terminal branches" >&2
     if [[ -n $staging_sha ]]; then
       selected_branch=$integration_branch
       selected_sha=$staging_sha
@@ -462,7 +490,7 @@ for ((dependency_index = 0; dependency_index < ${#dependency_repositories[@]}; d
         names+="${candidates[$i]}, "
       done
       names=${names%, }
-      echo "Ambiguous newest branches in ${repository}: ${names}" >&2
+      echo "Ambiguous newest branches in ${repository}: ${names}; no branch covers the required levels: ${!required_levels[*]}" >&2
       exit 1
     fi
     # Keep only the smallest qualifying branches: a branch containing
@@ -491,7 +519,7 @@ for ((dependency_index = 0; dependency_index < ${#dependency_repositories[@]}; d
             names+="${candidates[$j]}, "
           done
           names=${names%, }
-          echo "Ambiguous newest branches in ${repository}: ${names}" >&2
+          echo "Ambiguous newest branches in ${repository}: ${names}; required levels: ${!required_levels[*]}" >&2
           exit 1
         fi
       done
