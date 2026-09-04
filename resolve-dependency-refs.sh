@@ -67,7 +67,7 @@ repository_id() {
 declare -A pr_bases=()
 
 fetch_pr_edges() {
-  local id=$1 page=1 response status json head base count
+  local id=$1 page=1 status json head base count
   local -a auth=()
   [[ -n ${GITHUB_TOKEN:-} ]] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
   if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
@@ -75,13 +75,16 @@ fetch_pr_edges() {
     return 0
   fi
   while :; do
-    if ! response=$(curl -sL --retry 3 --max-time 30 -w $'\n%{http_code}' ${auth[@]+"${auth[@]}"} \
+    # The body must go to a file: with --retry, curl concatenates the bodies
+    # of failed attempts into captured stdout, but it truncates the -o file
+    # on every attempt, so the file always holds only the last response.
+    if ! status=$(curl -sL --retry 3 --max-time 30 \
+      -o "${evidence_directory}/pr-page.json" -w '%{http_code}' ${auth[@]+"${auth[@]}"} \
       "${GITHUB_API_URL:-https://api.github.com}/repos/${id}/pulls?state=open&per_page=100&page=${page}"); then
       echo "Warning: could not fetch pull request metadata for ${id}; continuing without PR evidence" >&2
       return 0
     fi
-    status=${response##*$'\n'}
-    json=${response%$'\n'*}
+    json=$(<"${evidence_directory}/pr-page.json")
     if [[ $status == 403 || $status == 404 ]]; then
       echo "Warning: cannot read pull request metadata for ${id} (HTTP ${status}); use a token with pull-requests: read (or the classic repo scope) if this is unexpected" >&2
       return 0
@@ -114,6 +117,8 @@ if origin_url=$(git -C "$source_directory" remote get-url origin 2>/dev/null); t
   source_repository_id=$(repository_id "$origin_url")
 fi
 
+evidence_directory=$(mktemp -d)
+
 # Only the source's own PR base chain is consulted: it names the stack
 # levels at or below the event. Dependency repositories are resolved by
 # their own content alone.
@@ -126,7 +131,6 @@ elif [[ $source_repository_id =~ ^[^/]+/[^/]+$ ]]; then
   fetch_pr_edges "$source_repository_id"
 fi
 
-evidence_directory=$(mktemp -d)
 declare -a evidence_paths=("$source_directory")
 declare -a evidence_ref_prefixes=("refs/remotes/origin/")
 declare -A cloned_paths=()

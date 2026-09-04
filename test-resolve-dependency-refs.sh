@@ -507,7 +507,14 @@ stub_directory="${test_directory}/stub"
 mkdir -p "$stub_directory"
 cat > "$stub_directory/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n200' '[{"head":{"repo":{"full_name":"specs-feup/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]'
+while [[ $# -gt 1 ]]; do
+  if [[ $1 == -o ]]; then
+    printf '%s' '[{"head":{"repo":{"full_name":"specs-feup/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]' > "$2"
+    printf '200'
+    exit 0
+  fi
+  shift
+done
 EOF
 chmod +x "$stub_directory/curl"
 
@@ -550,7 +557,14 @@ make_edge_fixture() {
 read -r fork_source fork_dependency <<<"$(make_edge_fixture fork "https://github.com/specs-feup/branch-resolver.git")"
 cat > "$stub_directory/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n200' '[{"head":{"repo":{"full_name":"fork-owner/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]'
+while [[ $# -gt 1 ]]; do
+  if [[ $1 == -o ]]; then
+    printf '%s' '[{"head":{"repo":{"full_name":"fork-owner/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]' > "$2"
+    printf '200'
+    exit 0
+  fi
+  shift
+done
 EOF
 chmod +x "$stub_directory/curl"
 fork_dependency_tip=$(git -C "$fork_dependency" rev-parse multi-weaver)
