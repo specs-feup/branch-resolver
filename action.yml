@@ -27,6 +27,13 @@ inputs:
     description: >
       Space-separated repositories consulted as extra ordering evidence,
       e.g. repos that depend on the source rather than the other way around.
+    required: false
+  github-token:
+    description: >
+      Token used to read each repository's open pull requests. The PR base
+      branches are the authoritative stack definition and take precedence
+      over inferred git ancestry.
+    default: ${{ github.token }}
 
 runs:
   using: composite
@@ -39,6 +46,7 @@ runs:
         ROOT_BRANCH: ${{ inputs.root-branch }}
         EVIDENCE_REPOSITORIES: ${{ inputs.evidence-repositories }}
         DEPENDENCIES: ${{ inputs.dependencies }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |
         output_file=$(mktemp)
         dep_args=()

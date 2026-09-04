@@ -39,6 +39,22 @@ rebased or shares its name across repositories.
 | `integration-branch` | no | Integration branch name; defaults to `staging` |
 | `root-branch` | no | Root branch name; defaults to `master` |
 | `evidence-repositories` | no | Extra repos consulted as ordering evidence |
+| `github-token` | no | Token for reading open PRs; defaults to `github.token` |
+
+## How it works
+
+Ordering evidence is resolved **per repository**: the same branch names can
+stack in opposite orders in different repositories (for example after a
+rebase), so a dependency is ordered only by its own content. The resolver
+collects the stack levels at or below the event commit in the source
+repository, then pins each dependency to the first of its own branches that
+contains all of those levels. Levels the source's history cannot prove
+(e.g. a parent rebased without a merge commit) are taken from the source's
+open PR base chain when available; nothing else depends on PR metadata.
+The source branch's own name never shadows a same-named branch in a
+dependency — each candidate must actually contain the required levels.
+When no dependency branch covers the required levels, the resolver fails
+with an ambiguity error rather than guessing.
 
 ## Outputs
 

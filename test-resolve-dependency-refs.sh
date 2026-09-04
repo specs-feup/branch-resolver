@@ -174,17 +174,20 @@ if SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/ambiguous-output"
 fi
 grep -Fq "Ambiguous newest branches" "${test_directory}/ambiguous.log"
 
-# Opposite strict orderings from two repositories are contradictory.
-if SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/contradictory-output" \
+# Opposite orderings in two repositories resolve per repository instead of
+# aborting globally: each dependency is ordered by its own repository's
+# refs alone.
+SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/per-repo-output" \
   bash "$resolver" "$source_repository" \
     forward "$middle_dependency" \
     reverse "$reverse_dependency" \
-    >"${test_directory}/contradictory.log" 2>&1; then
-  echo "Resolver accepted contradictory repository evidence" >&2
-  exit 1
-fi
-grep -Fq "Contradictory branch ordering evidence" \
-  "${test_directory}/contradictory.log"
+  >"${test_directory}/per-repo.log" 2>&1
+grep -Fqx "forward_branch=java-deprecation" "${test_directory}/per-repo-output"
+grep -Fqx "forward_ref=${java_deprecation_tip}" "${test_directory}/per-repo-output"
+# In the reverse repository the vitest ref contains the java-deprecation
+# tip, so vitest is the newer branch there and resolves to its own ref.
+grep -Fqx "reverse_branch=vitest" "${test_directory}/per-repo-output"
+grep -Fqx "reverse_ref=${java_deprecation_tip}" "${test_directory}/per-repo-output"
 
 # Terminal branch workflows must not create a staging/master ordering cycle.
 git -C "$source_repository" switch --quiet --detach "$staging_tip"
@@ -221,19 +224,361 @@ SOURCE_BRANCH=workflow-fix EVIDENCE_REPOSITORIES="$middle_dependency" \
 grep -Fqx "rebased_ref=${rebased_lmsousa_tip}" \
   "${test_directory}/rebased-output"
 
-# A shared sibling with the same fork point is not a proven stack member.
+# A shared sibling branch that cannot be verified as part of the event's
+# stack is ignored, not fatal: the dependency resolves to the newest
+# verifiable level (staging).
 git -C "$source_repository" update-ref \
   refs/remotes/origin/lmsousa "$lmsousa_tip"
 git -C "$source_repository" update-ref \
   refs/remotes/origin/unrelated-sibling "$unrelated_sibling_tip"
-if SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/sibling-output" \
+SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/sibling-output" \
   bash "$resolver" "$source_repository" \
     sibling "$sibling_dependency" \
-    >"${test_directory}/sibling.log" 2>&1; then
-  echo "Resolver selected an unproven sibling branch" >&2
+    >"${test_directory}/sibling.log" 2>&1
+grep -Fqx "sibling_branch=staging" "${test_directory}/sibling-output"
+grep -Fqx "sibling_ref=${staging_tip}" "${test_directory}/sibling-output"
+
+# === Cross-repository stacks ===
+# The same branch names can stack in opposite orders in different
+# repositories. Each dependency is ordered only by its own repository's
+# refs and PR base metadata: other repositories' ancestry must neither
+# dominate it nor elevate its branches, and the source branch's own name
+# must not shadow a dependency branch.
+
+new_fixture_repo() {
+  local path="${test_directory}/$1"
+  git init --quiet --initial-branch=master "$path"
+  git -C "$path" config user.name "CI Resolver Test"
+  git -C "$path" config user.email "ci-resolver@example.invalid"
+  echo "$path"
+}
+
+fcommit() { git -C "$1" commit --quiet --allow-empty -m "$2"; }
+
+publish_origin() {
+  local repo=$1 ref branch
+  while IFS= read -r ref; do
+    branch=${ref#refs/heads/}
+    git -C "$repo" update-ref "refs/remotes/origin/$branch" "$ref"
+  done < <(git -C "$repo" for-each-ref --format='%(refname)' refs/heads)
+}
+
+# A clava-like source stack (multi-weaver below ci-fix) with a lara-like
+# dependency whose stack is switched (multi-weaver above ci-fix). The
+# dependency must resolve to its own multi-weaver, never to the same-named
+# source branch, and unproven descendant branches (langSpecV3 and above in
+# the source's history) must not dominate or shadow the choice.
+switched_source=$(new_fixture_repo switched-source)
+fcommit "$switched_source" "source master"
+git -C "$switched_source" switch --quiet -c staging
+fcommit "$switched_source" "source staging"
+git -C "$switched_source" switch --quiet -c multi-weaver
+fcommit "$switched_source" "source multi-weaver"
+git -C "$switched_source" switch --quiet -c ci-fix
+fcommit "$switched_source" "source ci-fix"
+for branch in langSpecV3 ts6 vitest dumper-v3; do
+  git -C "$switched_source" switch --quiet -c "$branch"
+  fcommit "$switched_source" "source $branch"
+done
+git -C "$switched_source" switch --quiet master
+fcommit "$switched_source" "source master advanced"
+git -C "$switched_source" switch --quiet staging
+fcommit "$switched_source" "source staging advanced"
+git -C "$switched_source" switch --quiet --detach ci-fix
+publish_origin "$switched_source"
+
+switched_dependency=$(new_fixture_repo switched-dependency)
+fcommit "$switched_dependency" "dep master"
+git -C "$switched_dependency" switch --quiet -c ci-fix
+fcommit "$switched_dependency" "dep ci-fix"
+git -C "$switched_dependency" switch --quiet -c multi-weaver
+fcommit "$switched_dependency" "dep multi-weaver"
+git -C "$switched_dependency" switch --quiet -c langSpecV3
+fcommit "$switched_dependency" "dep langSpecV3"
+git -C "$switched_dependency" switch --quiet -c staging
+fcommit "$switched_dependency" "dep staging"
+git -C "$switched_dependency" switch --quiet master
+publish_origin "$switched_dependency"
+
+switched_dependency_tip=$(git -C "$switched_dependency" rev-parse multi-weaver)
+# An evidence repository stacking langSpecV3 below multi-weaver proves
+# langSpecV3 into the pool via propagation; the dependency still resolves
+# to its smallest covering branch (multi-weaver), never to that newer
+# pool descendant.
+switched_evidence=$(new_fixture_repo switched-evidence)
+fcommit "$switched_evidence" "se master"
+git -C "$switched_evidence" switch --quiet -c staging
+fcommit "$switched_evidence" "se staging"
+git -C "$switched_evidence" switch --quiet -c langSpecV3
+fcommit "$switched_evidence" "se langSpecV3"
+git -C "$switched_evidence" switch --quiet -c multi-weaver
+fcommit "$switched_evidence" "se multi-weaver"
+git -C "$switched_evidence" switch --quiet -c ci-fix
+fcommit "$switched_evidence" "se ci-fix"
+publish_origin "$switched_evidence"
+
+SOURCE_BRANCH=ci-fix EVIDENCE_REPOSITORIES="$switched_evidence" \
+  GITHUB_OUTPUT="${test_directory}/switched-output" \
+  bash "$resolver" "$switched_source" \
+    lara "$switched_dependency" \
+    >"${test_directory}/switched.log" 2>&1
+grep -Fqx "lara_branch=multi-weaver" "${test_directory}/switched-output"
+grep -Fqx "lara_ref=${switched_dependency_tip}" "${test_directory}/switched-output"
+
+# An evidence repository sharing the branch names but stacking them in the
+# opposite order must not prove the dependency's branches into the stack:
+# the source's own level (ci-fix) still wins for a dependency whose stack
+# agrees with the source's.
+polluted_source=$(new_fixture_repo polluted-source)
+fcommit "$polluted_source" "l master"
+git -C "$polluted_source" switch --quiet -c ci-fix
+fcommit "$polluted_source" "l ci-fix 1"
+fcommit "$polluted_source" "l ci-fix 2"
+git -C "$polluted_source" switch --quiet --detach \
+  "$(git -C "$polluted_source" rev-parse ci-fix~)"
+git -C "$polluted_source" switch --quiet -c multi-weaver
+fcommit "$polluted_source" "l multi-weaver"
+git -C "$polluted_source" switch --quiet --detach ci-fix
+publish_origin "$polluted_source"
+
+polluted_evidence=$(new_fixture_repo polluted-evidence)
+fcommit "$polluted_evidence" "e master"
+git -C "$polluted_evidence" switch --quiet -c staging
+fcommit "$polluted_evidence" "e staging"
+git -C "$polluted_evidence" switch --quiet -c multi-weaver
+fcommit "$polluted_evidence" "e multi-weaver"
+git -C "$polluted_evidence" switch --quiet -c ci-fix
+fcommit "$polluted_evidence" "e ci-fix 1"
+fcommit "$polluted_evidence" "e ci-fix 2"
+publish_origin "$polluted_evidence"
+
+polluted_dependency=$(new_fixture_repo polluted-dependency)
+fcommit "$polluted_dependency" "s master"
+git -C "$polluted_dependency" switch --quiet -c staging
+fcommit "$polluted_dependency" "s staging"
+git -C "$polluted_dependency" switch --quiet -c ci-fix
+fcommit "$polluted_dependency" "s ci-fix"
+git -C "$polluted_dependency" switch --quiet -c multi-weaver
+fcommit "$polluted_dependency" "s multi-weaver"
+git -C "$polluted_dependency" switch --quiet master
+publish_origin "$polluted_dependency"
+
+polluted_dependency_tip=$(git -C "$polluted_dependency" rev-parse ci-fix)
+SOURCE_BRANCH=ci-fix EVIDENCE_REPOSITORIES="$polluted_evidence" \
+  GITHUB_OUTPUT="${test_directory}/polluted-output" \
+  bash "$resolver" "$polluted_source" \
+    specs "$polluted_dependency" \
+    >"${test_directory}/polluted.log" 2>&1
+grep -Fqx "specs_branch=ci-fix" "${test_directory}/polluted-output"
+grep -Fqx "specs_ref=${polluted_dependency_tip}" "${test_directory}/polluted-output"
+
+# PR base metadata marks a level as required even when the source's git
+# history cannot prove it (rebased away). The dependency's multi-weaver
+# contains ci-fix, so it is the first branch covering both levels.
+pr_source=$(new_fixture_repo pr-source)
+git -C "$pr_source" remote add origin "$pr_source"
+fcommit "$pr_source" "p master"
+git -C "$pr_source" switch --quiet -c staging
+fcommit "$pr_source" "p staging"
+git -C "$pr_source" switch --quiet -c multi-weaver
+fcommit "$pr_source" "p multi-weaver old"
+git -C "$pr_source" switch --quiet -c ci-fix
+fcommit "$pr_source" "p ci-fix"
+git -C "$pr_source" switch --quiet multi-weaver
+git -C "$pr_source" reset --quiet --hard staging
+fcommit "$pr_source" "p multi-weaver new"
+git -C "$pr_source" switch --quiet --detach ci-fix
+publish_origin "$pr_source"
+
+pr_dependency=$(new_fixture_repo pr-dependency)
+fcommit "$pr_dependency" "q master"
+git -C "$pr_dependency" switch --quiet -c staging
+fcommit "$pr_dependency" "q staging"
+git -C "$pr_dependency" switch --quiet -c ci-fix
+fcommit "$pr_dependency" "q ci-fix"
+git -C "$pr_dependency" switch --quiet -c multi-weaver
+fcommit "$pr_dependency" "q multi-weaver"
+git -C "$pr_dependency" switch --quiet master
+publish_origin "$pr_dependency"
+
+pr_edges_file="${test_directory}/pr-edges"
+cat > "$pr_edges_file" <<EOF
+$pr_source ci-fix multi-weaver
+$pr_dependency multi-weaver ci-fix
+EOF
+
+pr_dependency_tip=$(git -C "$pr_dependency" rev-parse multi-weaver)
+SOURCE_BRANCH=ci-fix PR_BASE_EDGES="$pr_edges_file" \
+  GITHUB_OUTPUT="${test_directory}/pr-output" \
+  bash "$resolver" "$pr_source" \
+    lara "$pr_dependency" \
+    >"${test_directory}/pr.log" 2>&1
+grep -Fqx "lara_branch=multi-weaver" "${test_directory}/pr-output"
+grep -Fqx "lara_ref=${pr_dependency_tip}" "${test_directory}/pr-output"
+
+# PR base metadata demanding a level that no dependency branch contains
+# (diverged content) is an ambiguity error rather than a wrong pin.
+conflict_source=$(new_fixture_repo conflict-source)
+git -C "$conflict_source" remote add origin "$conflict_source"
+fcommit "$conflict_source" "c master"
+git -C "$conflict_source" switch --quiet -c staging
+fcommit "$conflict_source" "c staging"
+git -C "$conflict_source" switch --quiet -c vitest
+fcommit "$conflict_source" "c vitest"
+git -C "$conflict_source" switch --quiet -c java-deprecation
+fcommit "$conflict_source" "c java-deprecation"
+git -C "$conflict_source" switch --quiet --detach java-deprecation
+publish_origin "$conflict_source"
+
+conflict_dependency=$(new_fixture_repo conflict-dependency)
+fcommit "$conflict_dependency" "d master"
+git -C "$conflict_dependency" switch --quiet -c staging
+fcommit "$conflict_dependency" "d staging"
+git -C "$conflict_dependency" switch --quiet -c vitest
+fcommit "$conflict_dependency" "d vitest"
+git -C "$conflict_dependency" switch --quiet -c java-deprecation
+fcommit "$conflict_dependency" "d java-deprecation"
+git -C "$conflict_dependency" switch --quiet staging
+git -C "$conflict_dependency" switch --quiet -c feature-x
+fcommit "$conflict_dependency" "d feature-x"
+git -C "$conflict_dependency" switch --quiet master
+publish_origin "$conflict_dependency"
+
+cat > "$pr_edges_file" <<EOF
+$conflict_source java-deprecation feature-x
+EOF
+
+if SOURCE_BRANCH=java-deprecation PR_BASE_EDGES="$pr_edges_file" \
+  GITHUB_OUTPUT="${test_directory}/conflict-output" \
+  bash "$resolver" "$conflict_source" \
+    specs "$conflict_dependency" \
+    >"${test_directory}/conflict.log" 2>&1; then
+  echo "Resolver pinned a dependency that cannot satisfy a required level" >&2
   exit 1
 fi
-grep -Fq "Cannot place shared branch 'unrelated-sibling'" \
-  "${test_directory}/sibling.log"
+grep -Fq "Ambiguous newest branches" "${test_directory}/conflict.log"
+
+# The resolver can fetch PR base metadata from a GitHub API. A stub curl
+# serves a canned open-pull-requests response so the fetch path is exercised
+# offline.
+stub_directory="${test_directory}/stub"
+mkdir -p "$stub_directory"
+cat > "$stub_directory/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s' '[{"head":{"repo":{"full_name":"specs-feup/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]'
+EOF
+chmod +x "$stub_directory/curl"
+
+make_edge_fixture() {
+  local prefix=$1
+  local source_repository dependency
+  source_repository=$(new_fixture_repo "${prefix}-source")
+  git -C "$source_repository" remote add origin "$2"
+  fcommit "$source_repository" "${prefix} master"
+  git -C "$source_repository" switch --quiet -c staging
+  fcommit "$source_repository" "${prefix} staging"
+  git -C "$source_repository" switch --quiet -c multi-weaver
+  fcommit "$source_repository" "${prefix} multi-weaver"
+  # ci-fix branches from staging, not from multi-weaver: git history alone
+  # can neither prove multi-weaver as a level below the event nor order it
+  # against ci-fix, so only the PR metadata can.
+  git -C "$source_repository" switch --quiet staging
+  git -C "$source_repository" switch --quiet -c ci-fix
+  fcommit "$source_repository" "${prefix} ci-fix"
+  publish_origin "$source_repository"
+
+  dependency=$(new_fixture_repo "${prefix}-dependency")
+  fcommit "$dependency" "${prefix}d master"
+  git -C "$dependency" switch --quiet -c staging
+  fcommit "$dependency" "${prefix}d staging"
+  git -C "$dependency" switch --quiet -c ci-fix
+  fcommit "$dependency" "${prefix}d ci-fix"
+  git -C "$dependency" switch --quiet -c multi-weaver
+  fcommit "$dependency" "${prefix}d multi-weaver"
+  git -C "$dependency" switch --quiet master
+  publish_origin "$dependency"
+
+  echo "$source_repository $dependency"
+}
+
+# A fork-originated pull_request run: the source repository's open PR lists
+# the event PR, but its head repository is a fork, not the source itself.
+# The head -> base edge is still the authoritative stack definition of the
+# base repository's namespace and must be recorded.
+read -r fork_source fork_dependency <<<"$(make_edge_fixture fork "https://github.com/specs-feup/branch-resolver.git")"
+cat > "$stub_directory/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s' '[{"head":{"repo":{"full_name":"fork-owner/branch-resolver"},"ref":"ci-fix"},"base":{"ref":"multi-weaver"}}]'
+EOF
+chmod +x "$stub_directory/curl"
+fork_dependency_tip=$(git -C "$fork_dependency" rev-parse multi-weaver)
+PATH="$stub_directory:$PATH" SOURCE_BRANCH=ci-fix \
+  GITHUB_OUTPUT="${test_directory}/fork-output" \
+  bash "$resolver" "$fork_source" \
+    lara "$fork_dependency" \
+    >"${test_directory}/fork.log" 2>&1
+grep -Fqx "lara_branch=multi-weaver" "${test_directory}/fork-output"
+grep -Fqx "lara_ref=${fork_dependency_tip}" "${test_directory}/fork-output"
+
+# A GitHub Enterprise remote parses to the same owner/name repository id,
+# so the API lookup is attempted for Enterprise hosts too.
+read -r enterprise_source enterprise_dependency <<<"$(make_edge_fixture enterprise "https://github.example.com/specs-feup/branch-resolver.git")"
+enterprise_dependency_tip=$(git -C "$enterprise_dependency" rev-parse multi-weaver)
+PATH="$stub_directory:$PATH" SOURCE_BRANCH=ci-fix \
+  GITHUB_OUTPUT="${test_directory}/enterprise-output" \
+  bash "$resolver" "$enterprise_source" \
+    lara "$enterprise_dependency" \
+    >"${test_directory}/enterprise.log" 2>&1
+grep -Fqx "lara_branch=multi-weaver" "${test_directory}/enterprise-output"
+grep -Fqx "lara_ref=${enterprise_dependency_tip}" "${test_directory}/enterprise-output"
+
+# Propagation is scoped to the source repository and explicitly declared
+# evidence repositories: a dependency clone's own ancestry must not prove a
+# branch name into other dependencies. An unrelated dependency containing a
+# stray branch of a proven-elsewhere name falls back to staging.
+scoped_source=$(new_fixture_repo scoped-source)
+fcommit "$scoped_source" "sp master"
+git -C "$scoped_source" switch --quiet -c staging
+fcommit "$scoped_source" "sp staging"
+git -C "$scoped_source" switch --quiet -c vitest
+fcommit "$scoped_source" "sp vitest"
+git -C "$scoped_source" switch --quiet -c java-deprecation
+fcommit "$scoped_source" "sp java-deprecation"
+git -C "$scoped_source" switch --quiet -c workflow-fix
+fcommit "$scoped_source" "sp workflow-fix"
+git -C "$scoped_source" switch --quiet --detach java-deprecation
+git -C "$scoped_source" switch --quiet -c langspec
+fcommit "$scoped_source" "sp langspec"
+git -C "$scoped_source" switch --quiet --detach workflow-fix
+publish_origin "$scoped_source"
+
+scoped_prover=$(new_fixture_repo scoped-prover)
+fcommit "$scoped_prover" "pr master"
+git -C "$scoped_prover" switch --quiet -c staging
+fcommit "$scoped_prover" "pr staging"
+git -C "$scoped_prover" switch --quiet -c langspec
+fcommit "$scoped_prover" "pr langspec"
+git -C "$scoped_prover" switch --quiet -c java-deprecation
+fcommit "$scoped_prover" "pr java-deprecation"
+git -C "$scoped_prover" switch --quiet master
+publish_origin "$scoped_prover"
+
+scoped_other=$(new_fixture_repo scoped-other)
+fcommit "$scoped_other" "so master"
+git -C "$scoped_other" switch --quiet -c staging
+fcommit "$scoped_other" "so staging"
+git -C "$scoped_other" switch --quiet -c langspec
+fcommit "$scoped_other" "so langspec"
+git -C "$scoped_other" switch --quiet master
+publish_origin "$scoped_other"
+
+scoped_other_tip=$(git -C "$scoped_other" rev-parse staging)
+SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/scoped-output" \
+  bash "$resolver" "$scoped_source" \
+    prover "$scoped_prover" \
+    other "$scoped_other" \
+    >"${test_directory}/scoped.log" 2>&1
+grep -Fqx "other_branch=staging" "${test_directory}/scoped-output"
+grep -Fqx "other_ref=${scoped_other_tip}" "${test_directory}/scoped-output"
 
 echo "All dependency ref resolver tests passed"
