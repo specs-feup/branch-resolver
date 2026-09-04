@@ -458,4 +458,53 @@ if SOURCE_BRANCH=java-deprecation PR_BASE_EDGES="$pr_edges_file" \
 fi
 grep -Fq "Ambiguous newest branches" "${test_directory}/conflict.log"
 
+# Propagation is scoped to the source repository and explicitly declared
+# evidence repositories: a dependency clone's own ancestry must not prove a
+# branch name into other dependencies. An unrelated dependency containing a
+# stray branch of a proven-elsewhere name falls back to staging.
+scoped_source=$(new_fixture_repo scoped-source)
+fcommit "$scoped_source" "sp master"
+git -C "$scoped_source" switch --quiet -c staging
+fcommit "$scoped_source" "sp staging"
+git -C "$scoped_source" switch --quiet -c vitest
+fcommit "$scoped_source" "sp vitest"
+git -C "$scoped_source" switch --quiet -c java-deprecation
+fcommit "$scoped_source" "sp java-deprecation"
+git -C "$scoped_source" switch --quiet -c workflow-fix
+fcommit "$scoped_source" "sp workflow-fix"
+git -C "$scoped_source" switch --quiet --detach java-deprecation
+git -C "$scoped_source" switch --quiet -c langspec
+fcommit "$scoped_source" "sp langspec"
+git -C "$scoped_source" switch --quiet --detach workflow-fix
+publish_origin "$scoped_source"
+
+scoped_prover=$(new_fixture_repo scoped-prover)
+fcommit "$scoped_prover" "pr master"
+git -C "$scoped_prover" switch --quiet -c staging
+fcommit "$scoped_prover" "pr staging"
+git -C "$scoped_prover" switch --quiet -c langspec
+fcommit "$scoped_prover" "pr langspec"
+git -C "$scoped_prover" switch --quiet -c java-deprecation
+fcommit "$scoped_prover" "pr java-deprecation"
+git -C "$scoped_prover" switch --quiet master
+publish_origin "$scoped_prover"
+
+scoped_other=$(new_fixture_repo scoped-other)
+fcommit "$scoped_other" "so master"
+git -C "$scoped_other" switch --quiet -c staging
+fcommit "$scoped_other" "so staging"
+git -C "$scoped_other" switch --quiet -c langspec
+fcommit "$scoped_other" "so langspec"
+git -C "$scoped_other" switch --quiet master
+publish_origin "$scoped_other"
+
+scoped_other_tip=$(git -C "$scoped_other" rev-parse staging)
+SOURCE_BRANCH=workflow-fix GITHUB_OUTPUT="${test_directory}/scoped-output" \
+  bash "$resolver" "$scoped_source" \
+    prover "$scoped_prover" \
+    other "$scoped_other" \
+    >"${test_directory}/scoped.log" 2>&1
+grep -Fqx "other_branch=staging" "${test_directory}/scoped-output"
+grep -Fqx "other_ref=${scoped_other_tip}" "${test_directory}/scoped-output"
+
 echo "All dependency ref resolver tests passed"

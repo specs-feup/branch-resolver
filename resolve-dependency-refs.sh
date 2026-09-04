@@ -97,6 +97,7 @@ evidence_directory=$(mktemp -d)
 declare -a evidence_paths=("$source_directory")
 declare -a evidence_ref_prefixes=("refs/remotes/origin/")
 declare -A cloned_paths=()
+declare -A repo_index_by_name=()
 
 clone_evidence_repository() {
   local repository=$1
@@ -109,6 +110,7 @@ clone_evidence_repository() {
   git clone --quiet --bare --filter=blob:none \
     "$(repository_url "$repository")" "$clone_path"
   cloned_paths[$repository]=$clone_path
+  repo_index_by_name[$repository]=$(( ${#evidence_paths[@]} ))
   evidence_paths+=("$clone_path")
   evidence_ref_prefixes+=("refs/heads/")
 }
@@ -117,10 +119,15 @@ for repository in "${dependency_repositories[@]}"; do
   clone_evidence_repository "$repository"
 done
 
+declare -A propagation_repos=()
+propagation_repos[0]=1
+
 if [[ -n ${EVIDENCE_REPOSITORIES:-} ]]; then
   read -r -a additional_evidence <<< "$EVIDENCE_REPOSITORIES"
   for repository in "${additional_evidence[@]}"; do
     clone_evidence_repository "$repository"
+    index=${repo_index_by_name[$repository]:-}
+    [[ -n $index ]] && propagation_repos[$index]=1
   done
 fi
 
@@ -345,12 +352,16 @@ done
 # branch already observed directly on the source's stack. Propagate that
 # proof through a chain of strict first-parent relationships. The source
 # branch's own node is proven by definition and must not vouch for other
-# names through another repository's ordering: the same branch names can
-# stack in a different order there.
+# names through another repository's ordering, and proof only propagates
+# from the source repository and explicitly declared evidence repositories:
+# a dependency clone's own ancestry must not elevate a branch name in other
+# dependencies, where the same name can be an unrelated branch.
 proof_changed=true
 while [[ $proof_changed == true ]]; do
   proof_changed=false
   for edge in "${!strict_edges[@]}"; do
+    repo_index=${edge%%,*}
+    [[ -n ${propagation_repos[$repo_index]+yes} ]] || continue
     rest=${edge#*,}
     newer_index=${rest%,*}
     older_index=${rest#*,}
